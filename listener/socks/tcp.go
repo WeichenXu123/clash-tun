@@ -15,7 +15,24 @@ import (
 
 type Listener struct {
 	listener net.Listener
+	addr     string
 	closed   bool
+}
+
+// RawAddress implements C.Listener
+func (l *Listener) RawAddress() string {
+	return l.addr
+}
+
+// Address implements C.Listener
+func (l *Listener) Address() string {
+	return l.listener.Addr().String()
+}
+
+// Close implements C.Listener
+func (l *Listener) Close() error {
+	l.closed = true
+	return l.listener.Close()
 }
 
 func New(addr string, in chan<- C.ConnContext) (*Listener, error) {
@@ -26,6 +43,7 @@ func New(addr string, in chan<- C.ConnContext) (*Listener, error) {
 
 	sl := &Listener{
 		listener: l,
+		addr:     addr,
 	}
 	go func() {
 		for {
@@ -41,15 +59,6 @@ func New(addr string, in chan<- C.ConnContext) (*Listener, error) {
 	}()
 
 	return sl, nil
-}
-
-func (l *Listener) Close() {
-	l.closed = true
-	l.listener.Close()
-}
-
-func (l *Listener) Address() string {
-	return l.listener.Addr().String()
 }
 
 func handleSocks(conn net.Conn, in chan<- C.ConnContext) {
@@ -79,7 +88,7 @@ func HandleSocks4(conn net.Conn, in chan<- C.ConnContext) {
 	if c, ok := conn.(*net.TCPConn); ok {
 		c.SetKeepAlive(true)
 	}
-	in <- inbound.NewSocket(socks5.ParseAddr(addr), conn, C.SOCKS)
+	in <- inbound.NewSocket(socks5.ParseAddr(addr), conn, C.SOCKS4)
 }
 
 func HandleSocks5(conn net.Conn, in chan<- C.ConnContext) {
@@ -96,5 +105,5 @@ func HandleSocks5(conn net.Conn, in chan<- C.ConnContext) {
 		io.Copy(ioutil.Discard, conn)
 		return
 	}
-	in <- inbound.NewSocket(target, conn, C.SOCKS)
+	in <- inbound.NewSocket(target, conn, C.SOCKS5)
 }

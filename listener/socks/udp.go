@@ -13,7 +13,24 @@ import (
 
 type UDPListener struct {
 	packetConn net.PacketConn
+	addr       string
 	closed     bool
+}
+
+// RawAddress implements C.Listener
+func (l *UDPListener) RawAddress() string {
+	return l.addr
+}
+
+// Address implements C.Listener
+func (l *UDPListener) Address() string {
+	return l.packetConn.LocalAddr().String()
+}
+
+// Close implements C.Listener
+func (l *UDPListener) Close() error {
+	l.closed = true
+	return l.packetConn.Close()
 }
 
 func NewUDP(addr string, in chan<- *inbound.PacketAdapter) (*UDPListener, error) {
@@ -28,6 +45,7 @@ func NewUDP(addr string, in chan<- *inbound.PacketAdapter) (*UDPListener, error)
 
 	sl := &UDPListener{
 		packetConn: l,
+		addr:       addr,
 	}
 	go func() {
 		for {
@@ -47,15 +65,6 @@ func NewUDP(addr string, in chan<- *inbound.PacketAdapter) (*UDPListener, error)
 	return sl, nil
 }
 
-func (l *UDPListener) Close() error {
-	l.closed = true
-	return l.packetConn.Close()
-}
-
-func (l *UDPListener) Address() string {
-	return l.packetConn.LocalAddr().String()
-}
-
 func handleSocksUDP(pc net.PacketConn, in chan<- *inbound.PacketAdapter, buf []byte, addr net.Addr) {
 	target, payload, err := socks5.DecodeUDPPacket(buf)
 	if err != nil {
@@ -70,7 +79,7 @@ func handleSocksUDP(pc net.PacketConn, in chan<- *inbound.PacketAdapter, buf []b
 		bufRef:  buf,
 	}
 	select {
-	case in <- inbound.NewPacket(target, packet, C.SOCKS):
+	case in <- inbound.NewPacket(target, packet, C.SOCKS5):
 	default:
 	}
 }
