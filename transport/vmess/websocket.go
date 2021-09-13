@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -129,14 +130,12 @@ func (wsc *websocketConn) SetWriteDeadline(t time.Time) error {
 }
 
 func (wsedc *websocketWithEarlyDataConn) Dial(earlyData []byte) error {
-	earlyDataBuf := bytes.NewBuffer(nil)
-	base64EarlyDataEncoder := base64.NewEncoder(base64.RawURLEncoding, earlyDataBuf)
+	base64DataBuf := &bytes.Buffer{}
+	base64EarlyDataEncoder := base64.NewEncoder(base64.RawURLEncoding, base64DataBuf)
 
-	earlydata := bytes.NewReader(earlyData)
-	limitedEarlyDatareader := io.LimitReader(earlydata, int64(wsedc.config.MaxEarlyData))
-	n, encerr := io.Copy(base64EarlyDataEncoder, limitedEarlyDatareader)
-	if encerr != nil {
-		return errors.New("failed to encode early data: " + encerr.Error())
+	earlyDataBuf := bytes.NewBuffer(earlyData)
+	if _, err := base64EarlyDataEncoder.Write(earlyDataBuf.Next(wsedc.config.MaxEarlyData)); err != nil {
+		return errors.New("failed to encode early data: " + err.Error())
 	}
 
 	if errc := base64EarlyDataEncoder.Close(); errc != nil {
@@ -144,15 +143,14 @@ func (wsedc *websocketWithEarlyDataConn) Dial(earlyData []byte) error {
 	}
 
 	var err error
-	if wsedc.Conn, err = streamWebsocketConn(wsedc.underlay, wsedc.config, earlyDataBuf); err != nil {
+	if wsedc.Conn, err = streamWebsocketConn(wsedc.underlay, wsedc.config, base64DataBuf); err != nil {
 		wsedc.Close()
 		return errors.New("failed to dial WebSocket: " + err.Error())
 	}
 
 	wsedc.dialed <- true
-
-	if n != int64(len(earlyData)) {
-		_, err = wsedc.Conn.Write(earlyData[n:])
+	if earlyDataBuf.Len() != 0 {
+		_, err = wsedc.Conn.Write(earlyDataBuf.Bytes())
 	}
 
 	return err
@@ -305,6 +303,18 @@ func streamWebsocketConn(conn net.Conn, c *WebsocketConfig, earlyData *bytes.Buf
 }
 
 func StreamWebsocketConn(conn net.Conn, c *WebsocketConfig) (net.Conn, error) {
+	if u, err := url.Parse(c.Path); err == nil {
+		if q := u.Query(); q.Get("ed") != "" {
+			if ed, err := strconv.Atoi(q.Get("ed")); err == nil {
+				c.MaxEarlyData = ed
+				c.EarlyDataHeaderName = "Sec-WebSocket-Protocol"
+				q.Del("ed")
+				u.RawQuery = q.Encode()
+				c.Path = u.String()
+			}
+		}
+	}
+
 	if c.MaxEarlyData > 0 {
 		return streamWebsocketWithEarlyDataConn(conn, c)
 	}
