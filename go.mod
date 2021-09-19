@@ -20,12 +20,12 @@ require (
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	golang.org/x/sys v0.0.0-20210906170528-6f6e22806c34
 	gopkg.in/yaml.v2 v2.4.0
-	gvisor.dev/gvisor v0.0.0-20210519191755-bd7eb2c99ba9
+	gvisor.dev/gvisor v0.0.0-20210918130502-d5c50f700528
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/google/btree v1.0.0 // indirect
+	github.com/google/btree v1.0.1 // indirect
 	github.com/oschwald/maxminddb-golang v1.8.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/u-root/uio v0.0.0-20210528114334-82958018845c // indirect
