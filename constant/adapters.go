@@ -23,6 +23,7 @@ const (
 	Relay
 	Selector
 	Fallback
+	MemFallback
 	URLTest
 	LoadBalance
 )
@@ -141,6 +142,8 @@ func (at AdapterType) String() string {
 		return "Selector"
 	case Fallback:
 		return "Fallback"
+	case MemFallback:
+		return "MemFallback"
 	case URLTest:
 		return "URLTest"
 	case LoadBalance:
