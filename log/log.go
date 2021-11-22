@@ -22,7 +22,16 @@ func init() {
 
 type Event struct {
 	LogLevel LogLevel
-	Payload  string
+	Format   string
+	Payload  []interface{}
+	str      string
+}
+
+func (ev *Event) String() string {
+	if ev.str == "" {
+		ev.str = fmt.Sprintf(ev.Format, ev.Payload...)
+	}
+	return ev.str
 }
 
 func (e *Event) Type() string {
@@ -81,19 +90,22 @@ func print(data *Event) {
 
 	switch data.LogLevel {
 	case INFO:
-		log.Infoln(data.Payload)
+		log.Infoln(data.String())
 	case WARNING:
-		log.Warnln(data.Payload)
+		log.Warnln(data.String())
 	case ERROR:
-		log.Errorln(data.Payload)
+		log.Errorln(data.String())
 	case DEBUG:
-		log.Debugln(data.Payload)
+		log.Debugln(data.String())
 	}
 }
 
 func newLog(logLevel LogLevel, format string, v ...interface{}) *Event {
-	return &Event{
+	ev := &Event{
 		LogLevel: logLevel,
-		Payload:  fmt.Sprintf(format, v...),
+		Format:   format,
+		Payload:  v,
 	}
+	// ev.String()
+	return ev
 }

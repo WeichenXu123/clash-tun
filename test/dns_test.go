@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	CD "github.com/Dreamacro/clash/dns"
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 )
@@ -100,4 +101,23 @@ dns:
 	assert.NoError(t, err)
 	assert.NotEmpty(t, rr)
 	assert.Equal(t, rr[0].(*dns.AAAA).AAAA.String(), "2606:4700:4700::1111")
+}
+
+func Benchmark_Query(b *testing.B) {
+	cfg := CD.Config{
+		Main: []CD.NameServer{
+			CD.NameServer{"udp", "119.29.29.29"},
+		},
+		FallbackFilter: CD.FallbackFilter{},
+	}
+
+	r := CD.NewResolver(cfg)
+	r.ResolveIP("1.1.1.1.nip.io")
+	b.StartTimer()
+
+	for i := 0; i < b.N; i++ {
+		if _, err := r.ResolveIP("1.1.1.1.nip.io"); err != nil {
+			assert.FailNow(b, err.Error())
+		}
+	}
 }

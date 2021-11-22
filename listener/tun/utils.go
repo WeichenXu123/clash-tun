@@ -3,6 +3,7 @@ package tun
 import (
 	"fmt"
 	"net"
+	"strconv"
 
 	"github.com/Dreamacro/clash/component/resolver"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -106,4 +107,13 @@ func writeUDP(r *stack.Route, data buffer.VectorisedView, localPort, remotePort 
 	// Track count of packets sent.
 	r.Stats().UDP.PacketsSent.Increment()
 	return data.Size(), nil
+}
+
+type FullAddr struct {
+	Address tcpip.Address
+	Port    uint16
+}
+
+func (addr FullAddr) String() string { // For better logging performance
+	return net.JoinHostPort(addr.Address.String(), strconv.Itoa(int(addr.Port)))
 }

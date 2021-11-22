@@ -220,7 +220,7 @@ func getLogs(w http.ResponseWriter, r *http.Request) {
 
 		if err := json.NewEncoder(buf).Encode(Log{
 			Type:    log.Type(),
-			Payload: log.Payload,
+			Payload: log.String(),
 		}); err != nil {
 			break
 		}
