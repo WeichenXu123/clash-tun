@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/Dreamacro/clash/adapter/inbound"
@@ -86,10 +87,13 @@ func NewTunProxy(deviceURL string, tcpIn chan<- C.ConnContext, udpIn chan<- *inb
 	// maximum number of half-open tcp connection set to 1024
 	// receive buffer size set to 20k
 	tcpFwd := tcp.NewForwarder(ipstack, 20*1024, 1024, func(r *tcp.ForwarderRequest) {
+		src := net.JoinHostPort(r.ID().RemoteAddress.String(), strconv.Itoa((int)(r.ID().RemotePort)))
+		dst := net.JoinHostPort(r.ID().LocalAddress.String(), strconv.Itoa((int)(r.ID().LocalPort)))
+		log.Debugln("Get TCP Syn %v -> %s in ipstack", src, dst)
 		var wq waiter.Queue
 		ep, err := r.CreateEndpoint(&wq)
 		if err != nil {
-			log.Warnln("Can't create TCP Endpoint in ipstack: %v", err)
+			log.Warnln("Can't create TCP Endpoint(%s -> %s) in ipstack: %v", src, dst, err)
 			r.Complete(true)
 			return
 		}
