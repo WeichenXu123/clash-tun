@@ -27,7 +27,7 @@ type BazOptional struct {
 }
 
 func TestStructure_Basic(t *testing.T) {
-	rawMap := map[string]interface{}{
+	rawMap := map[string]any{
 		"foo":   1,
 		"bar":   "test",
 		"extra": false,
@@ -45,7 +45,7 @@ func TestStructure_Basic(t *testing.T) {
 }
 
 func TestStructure_Slice(t *testing.T) {
-	rawMap := map[string]interface{}{
+	rawMap := map[string]any{
 		"foo": 1,
 		"bar": []string{"one", "two"},
 	}
@@ -62,7 +62,7 @@ func TestStructure_Slice(t *testing.T) {
 }
 
 func TestStructure_Optional(t *testing.T) {
-	rawMap := map[string]interface{}{
+	rawMap := map[string]any{
 		"foo": 1,
 	}
 
@@ -77,7 +77,7 @@ func TestStructure_Optional(t *testing.T) {
 }
 
 func TestStructure_MissingKey(t *testing.T) {
-	rawMap := map[string]interface{}{
+	rawMap := map[string]any{
 		"foo": 1,
 	}
 
@@ -87,14 +87,14 @@ func TestStructure_MissingKey(t *testing.T) {
 }
 
 func TestStructure_ParamError(t *testing.T) {
-	rawMap := map[string]interface{}{}
+	rawMap := map[string]any{}
 	s := Baz{}
 	err := decoder.Decode(rawMap, s)
 	assert.NotNilf(t, err, "should throw error: %#v", s)
 }
 
 func TestStructure_SliceTypeError(t *testing.T) {
-	rawMap := map[string]interface{}{
+	rawMap := map[string]any{
 		"foo": 1,
 		"bar": []int{1, 2},
 	}
@@ -105,7 +105,7 @@ func TestStructure_SliceTypeError(t *testing.T) {
 }
 
 func TestStructure_WeakType(t *testing.T) {
-	rawMap := map[string]interface{}{
+	rawMap := map[string]any{
 		"foo": "1",
 		"bar": []int{1},
 	}
@@ -122,7 +122,7 @@ func TestStructure_WeakType(t *testing.T) {
 }
 
 func TestStructure_Nest(t *testing.T) {
-	rawMap := map[string]interface{}{
+	rawMap := map[string]any{
 		"foo": 1,
 	}
 
@@ -136,4 +136,46 @@ func TestStructure_Nest(t *testing.T) {
 	err := decoder.Decode(rawMap, s)
 	assert.Nil(t, err)
 	assert.Equal(t, s.BazOptional, goal)
+}
+
+func TestStructure_SliceNilValue(t *testing.T) {
+	rawMap := map[string]any{
+		"foo": 1,
+		"bar": []any{"bar", nil},
+	}
+
+	goal := &BazSlice{
+		Foo: 1,
+		Bar: []string{"bar", ""},
+	}
+
+	s := &BazSlice{}
+	err := weakTypeDecoder.Decode(rawMap, s)
+	assert.Nil(t, err)
+	assert.Equal(t, goal.Bar, s.Bar)
+
+	s = &BazSlice{}
+	err = decoder.Decode(rawMap, s)
+	assert.NotNil(t, err)
+}
+
+func TestStructure_SliceNilValueComplex(t *testing.T) {
+	rawMap := map[string]any{
+		"bar": []any{map[string]any{"bar": "foo"}, nil},
+	}
+
+	s := &struct {
+		Bar []map[string]any `test:"bar"`
+	}{}
+
+	err := decoder.Decode(rawMap, s)
+	assert.Nil(t, err)
+	assert.Nil(t, s.Bar[1])
+
+	ss := &struct {
+		Bar []Baz `test:"bar"`
+	}{}
+
+	err = decoder.Decode(rawMap, ss)
+	assert.NotNil(t, err)
 }

@@ -10,11 +10,10 @@ import (
 	"github.com/Dreamacro/clash/common/structure"
 	"github.com/Dreamacro/clash/component/dialer"
 	C "github.com/Dreamacro/clash/constant"
+	"github.com/Dreamacro/clash/transport/shadowsocks/core"
 	obfs "github.com/Dreamacro/clash/transport/simple-obfs"
 	"github.com/Dreamacro/clash/transport/socks5"
 	v2rayObfs "github.com/Dreamacro/clash/transport/v2ray-plugin"
-
-	"github.com/Dreamacro/go-shadowsocks2/core"
 )
 
 type ShadowSocks struct {
@@ -29,14 +28,14 @@ type ShadowSocks struct {
 
 type ShadowSocksOption struct {
 	BasicOption
-	Name       string                 `proxy:"name"`
-	Server     string                 `proxy:"server"`
-	Port       int                    `proxy:"port"`
-	Password   string                 `proxy:"password"`
-	Cipher     string                 `proxy:"cipher"`
-	UDP        bool                   `proxy:"udp,omitempty"`
-	Plugin     string                 `proxy:"plugin,omitempty"`
-	PluginOpts map[string]interface{} `proxy:"plugin-opts,omitempty"`
+	Name       string         `proxy:"name"`
+	Server     string         `proxy:"server"`
+	Port       int            `proxy:"port"`
+	Password   string         `proxy:"password"`
+	Cipher     string         `proxy:"cipher"`
+	UDP        bool           `proxy:"udp,omitempty"`
+	Plugin     string         `proxy:"plugin,omitempty"`
+	PluginOpts map[string]any `proxy:"plugin-opts,omitempty"`
 }
 
 type simpleObfsOption struct {
@@ -82,7 +81,9 @@ func (ss *ShadowSocks) DialContext(ctx context.Context, metadata *C.Metadata, op
 	}
 	tcpKeepAlive(c)
 
-	defer safeConnClose(c, err)
+	defer func(c net.Conn) {
+		safeConnClose(c, err)
+	}(c)
 
 	c, err = ss.StreamConn(c, metadata)
 	return NewConn(c, ss), err
@@ -160,6 +161,7 @@ func NewShadowSocks(option ShadowSocksOption) (*ShadowSocks, error) {
 			tp:    C.Shadowsocks,
 			udp:   option.UDP,
 			iface: option.Interface,
+			rmark: option.RoutingMark,
 		},
 		cipher: ciph,
 

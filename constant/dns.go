@@ -3,13 +3,13 @@ package constant
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // DNSModeMapping is a mapping for EnhancedMode enum
 var DNSModeMapping = map[string]DNSMode{
-	DNSNormal.String():  DNSNormal,
-	DNSFakeIP.String():  DNSFakeIP,
-	DNSMapping.String(): DNSMapping,
+	DNSNormal.String(): DNSNormal,
+	DNSFakeIP.String(): DNSFakeIP,
 }
 
 const (
@@ -21,21 +21,21 @@ const (
 type DNSMode int
 
 // UnmarshalYAML unserialize EnhancedMode with yaml
-func (e *DNSMode) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (e *DNSMode) UnmarshalYAML(unmarshal func(any) error) error {
 	var tp string
 	if err := unmarshal(&tp); err != nil {
 		return err
 	}
 	mode, exist := DNSModeMapping[tp]
 	if !exist {
-		return errors.New("invalid mode")
+		return fmt.Errorf("invalid mode: %s", tp)
 	}
 	*e = mode
 	return nil
 }
 
 // MarshalYAML serialize EnhancedMode with yaml
-func (e DNSMode) MarshalYAML() (interface{}, error) {
+func (e DNSMode) MarshalYAML() (any, error) {
 	return e.String(), nil
 }
 

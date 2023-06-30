@@ -2,7 +2,9 @@ package process
 
 import (
 	"encoding/binary"
-	"net"
+	"net/netip"
+	"strconv"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -15,7 +17,23 @@ const (
 	proccallnumpidinfo  = 0x2
 )
 
-func findProcessName(network string, ip net.IP, port int) (string, error) {
+var structSize = func() int {
+	value, _ := syscall.Sysctl("kern.osrelease")
+	major, _, _ := strings.Cut(value, ".")
+	n, _ := strconv.ParseInt(major, 10, 64)
+	switch true {
+	case n >= 22:
+		return 408
+	default:
+		// from darwin-xnu/bsd/netinet/in_pcblist.c:get_pcblist_n
+		// size/offset are round up (aligned) to 8 bytes in darwin
+		// rup8(sizeof(xinpcb_n)) + rup8(sizeof(xsocket_n)) +
+		// 2 * rup8(sizeof(xsockbuf_n)) + rup8(sizeof(xsockstat_n))
+		return 384
+	}
+}()
+
+func findProcessPath(network string, from netip.AddrPort, _ netip.AddrPort) (string, error) {
 	var spath string
 	switch network {
 	case TCP:
@@ -26,7 +44,7 @@ func findProcessName(network string, ip net.IP, port int) (string, error) {
 		return "", ErrInvalidNetwork
 	}
 
-	isIPv4 := ip.To4() != nil
+	isIPv4 := from.Addr().Is4()
 
 	value, err := syscall.Sysctl(spath)
 	if err != nil {
@@ -34,48 +52,62 @@ func findProcessName(network string, ip net.IP, port int) (string, error) {
 	}
 
 	buf := []byte(value)
-
-	// from darwin-xnu/bsd/netinet/in_pcblist.c:get_pcblist_n
-	// size/offset are round up (aligned) to 8 bytes in darwin
-	// rup8(sizeof(xinpcb_n)) + rup8(sizeof(xsocket_n)) +
-	// 2 * rup8(sizeof(xsockbuf_n)) + rup8(sizeof(xsockstat_n))
-	itemSize := 384
+	itemSize := structSize
 	if network == TCP {
 		// rup8(sizeof(xtcpcb_n))
 		itemSize += 208
 	}
+
+	var fallbackUDPProcess string
 	// skip the first xinpgen(24 bytes) block
 	for i := 24; i+itemSize <= len(buf); i += itemSize {
 		// offset of xinpcb_n and xsocket_n
 		inp, so := i, i+104
 
 		srcPort := binary.BigEndian.Uint16(buf[inp+18 : inp+20])
-		if uint16(port) != srcPort {
+		if from.Port() != srcPort {
 			continue
 		}
+
+		// FIXME: add dstPort check
 
 		// xinpcb_n.inp_vflag
 		flag := buf[inp+44]
 
-		var srcIP net.IP
+		var (
+			srcIP     netip.Addr
+			srcIPOk   bool
+			srcIsIPv4 bool
+		)
 		switch {
 		case flag&0x1 > 0 && isIPv4:
 			// ipv4
-			srcIP = net.IP(buf[inp+76 : inp+80])
+			srcIP, srcIPOk = netip.AddrFromSlice(buf[inp+76 : inp+80])
+			srcIsIPv4 = true
 		case flag&0x2 > 0 && !isIPv4:
 			// ipv6
-			srcIP = net.IP(buf[inp+64 : inp+80])
+			srcIP, srcIPOk = netip.AddrFromSlice(buf[inp+64 : inp+80])
 		default:
 			continue
 		}
-
-		if !ip.Equal(srcIP) {
+		if !srcIPOk {
 			continue
 		}
 
-		// xsocket_n.so_last_pid
-		pid := readNativeUint32(buf[so+68 : so+72])
-		return getExecPathFromPID(pid)
+		if from.Addr() == srcIP { // FIXME: add dstIP check
+			// xsocket_n.so_last_pid
+			pid := readNativeUint32(buf[so+68 : so+72])
+			return getExecPathFromPID(pid)
+		}
+
+		// udp packet connection may be not equal with srcIP
+		if network == UDP && srcIP.IsUnspecified() && isIPv4 == srcIsIPv4 {
+			fallbackUDPProcess, _ = getExecPathFromPID(readNativeUint32(buf[so+68 : so+72]))
+		}
+	}
+
+	if network == UDP && fallbackUDPProcess != "" {
+		return fallbackUDPProcess, nil
 	}
 
 	return "", ErrNotFound

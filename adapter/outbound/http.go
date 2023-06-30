@@ -22,25 +22,29 @@ type Http struct {
 	user      string
 	pass      string
 	tlsConfig *tls.Config
+	Headers   http.Header
 }
 
 type HttpOption struct {
 	BasicOption
-	Name           string `proxy:"name"`
-	Server         string `proxy:"server"`
-	Port           int    `proxy:"port"`
-	UserName       string `proxy:"username,omitempty"`
-	Password       string `proxy:"password,omitempty"`
-	TLS            bool   `proxy:"tls,omitempty"`
-	SNI            string `proxy:"sni,omitempty"`
-	SkipCertVerify bool   `proxy:"skip-cert-verify,omitempty"`
+	Name           string            `proxy:"name"`
+	Server         string            `proxy:"server"`
+	Port           int               `proxy:"port"`
+	UserName       string            `proxy:"username,omitempty"`
+	Password       string            `proxy:"password,omitempty"`
+	TLS            bool              `proxy:"tls,omitempty"`
+	SNI            string            `proxy:"sni,omitempty"`
+	SkipCertVerify bool              `proxy:"skip-cert-verify,omitempty"`
+	Headers        map[string]string `proxy:"headers,omitempty"`
 }
 
 // StreamConn implements C.ProxyAdapter
 func (h *Http) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
 	if h.tlsConfig != nil {
 		cc := tls.Client(c, h.tlsConfig)
-		err := cc.Handshake()
+		ctx, cancel := context.WithTimeout(context.Background(), C.DefaultTLSTimeout)
+		defer cancel()
+		err := cc.HandshakeContext(ctx)
 		c = cc
 		if err != nil {
 			return nil, fmt.Errorf("%s connect error: %w", h.addr, err)
@@ -61,7 +65,9 @@ func (h *Http) DialContext(ctx context.Context, metadata *C.Metadata, opts ...di
 	}
 	tcpKeepAlive(c)
 
-	defer safeConnClose(c, err)
+	defer func(c net.Conn) {
+		safeConnClose(c, err)
+	}(c)
 
 	c, err = h.StreamConn(c, metadata)
 	if err != nil {
@@ -78,11 +84,11 @@ func (h *Http) shakeHand(metadata *C.Metadata, rw io.ReadWriter) error {
 		URL: &url.URL{
 			Host: addr,
 		},
-		Host: addr,
-		Header: http.Header{
-			"Proxy-Connection": []string{"Keep-Alive"},
-		},
+		Host:   addr,
+		Header: h.Headers.Clone(),
 	}
+
+	req.Header.Add("Proxy-Connection", "Keep-Alive")
 
 	if h.user != "" && h.pass != "" {
 		auth := h.user + ":" + h.pass
@@ -130,15 +136,22 @@ func NewHttp(option HttpOption) *Http {
 		}
 	}
 
+	headers := http.Header{}
+	for name, value := range option.Headers {
+		headers.Add(name, value)
+	}
+
 	return &Http{
 		Base: &Base{
 			name:  option.Name,
 			addr:  net.JoinHostPort(option.Server, strconv.Itoa(option.Port)),
 			tp:    C.Http,
 			iface: option.Interface,
+			rmark: option.RoutingMark,
 		},
 		user:      option.UserName,
 		pass:      option.Password,
 		tlsConfig: tlsConfig,
+		Headers:   headers,
 	}
 }

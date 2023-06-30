@@ -23,13 +23,13 @@ type Snell struct {
 
 type SnellOption struct {
 	BasicOption
-	Name     string                 `proxy:"name"`
-	Server   string                 `proxy:"server"`
-	Port     int                    `proxy:"port"`
-	Psk      string                 `proxy:"psk"`
-	UDP      bool                   `proxy:"udp,omitempty"`
-	Version  int                    `proxy:"version,omitempty"`
-	ObfsOpts map[string]interface{} `proxy:"obfs-opts,omitempty"`
+	Name     string         `proxy:"name"`
+	Server   string         `proxy:"server"`
+	Port     int            `proxy:"port"`
+	Psk      string         `proxy:"psk"`
+	UDP      bool           `proxy:"udp,omitempty"`
+	Version  int            `proxy:"version,omitempty"`
+	ObfsOpts map[string]any `proxy:"obfs-opts,omitempty"`
 }
 
 type streamOption struct {
@@ -80,7 +80,9 @@ func (s *Snell) DialContext(ctx context.Context, metadata *C.Metadata, opts ...d
 	}
 	tcpKeepAlive(c)
 
-	defer safeConnClose(c, err)
+	defer func(c net.Conn) {
+		safeConnClose(c, err)
+	}(c)
 
 	c, err = s.StreamConn(c, metadata)
 	return NewConn(c, s), err
@@ -142,6 +144,7 @@ func NewSnell(option SnellOption) (*Snell, error) {
 			tp:    C.Snell,
 			udp:   option.UDP,
 			iface: option.Interface,
+			rmark: option.RoutingMark,
 		},
 		psk:        psk,
 		obfsOption: obfsOption,

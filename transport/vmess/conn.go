@@ -1,26 +1,23 @@
 package vmess
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/md5"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"hash/fnv"
 	"io"
-	"math/rand"
+	mathRand "math/rand"
 	"net"
 	"time"
 
+	"github.com/Dreamacro/protobytes"
 	"golang.org/x/crypto/chacha20poly1305"
 )
-
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
 
 // Conn wrapper a net.Conn with vmess protocol
 type Conn struct {
@@ -35,6 +32,7 @@ type Conn struct {
 	respBodyKey []byte
 	respV       byte
 	security    byte
+	option      byte
 	isAead      bool
 
 	received bool
@@ -59,48 +57,46 @@ func (vc *Conn) Read(b []byte) (int, error) {
 func (vc *Conn) sendRequest() error {
 	timestamp := time.Now()
 
-	mbuf := &bytes.Buffer{}
+	mbuf := protobytes.BytesWriter{}
 
 	if !vc.isAead {
 		h := hmac.New(md5.New, vc.id.UUID.Bytes())
 		binary.Write(h, binary.BigEndian, uint64(timestamp.Unix()))
-		mbuf.Write(h.Sum(nil))
+		mbuf.PutSlice(h.Sum(nil))
 	}
 
-	buf := &bytes.Buffer{}
+	buf := protobytes.BytesWriter{}
 
 	// Ver IV Key V Opt
-	buf.WriteByte(Version)
-	buf.Write(vc.reqBodyIV[:])
-	buf.Write(vc.reqBodyKey[:])
-	buf.WriteByte(vc.respV)
-	buf.WriteByte(OptionChunkStream)
+	buf.PutUint8(Version)
+	buf.PutSlice(vc.reqBodyIV[:])
+	buf.PutSlice(vc.reqBodyKey[:])
+	buf.PutUint8(vc.respV)
+	buf.PutUint8(vc.option)
 
-	p := rand.Intn(16)
+	p := mathRand.Intn(16)
 	// P Sec Reserve Cmd
-	buf.WriteByte(byte(p<<4) | byte(vc.security))
-	buf.WriteByte(0)
+	buf.PutUint8(byte(p<<4) | vc.security)
+	buf.PutUint8(0)
 	if vc.dst.UDP {
-		buf.WriteByte(CommandUDP)
+		buf.PutUint8(CommandUDP)
 	} else {
-		buf.WriteByte(CommandTCP)
+		buf.PutUint8(CommandTCP)
 	}
 
 	// Port AddrType Addr
-	binary.Write(buf, binary.BigEndian, uint16(vc.dst.Port))
-	buf.WriteByte(vc.dst.AddrType)
-	buf.Write(vc.dst.Addr)
+	buf.PutUint16be(uint16(vc.dst.Port))
+	buf.PutUint8(vc.dst.AddrType)
+	buf.PutSlice(vc.dst.Addr)
 
 	// padding
 	if p > 0 {
-		padding := make([]byte, p)
-		rand.Read(padding)
-		buf.Write(padding)
+		buf.ReadFull(rand.Reader, p)
 	}
 
 	fnv1a := fnv.New32a()
 	fnv1a.Write(buf.Bytes())
-	buf.Write(fnv1a.Sum(nil))
+	buf.PutSlice(fnv1a.Sum(nil))
 
 	if !vc.isAead {
 		block, err := aes.NewCipher(vc.id.CmdKey)
@@ -110,7 +106,7 @@ func (vc *Conn) sendRequest() error {
 
 		stream := cipher.NewCFBEncrypter(block, hashTimestamp(timestamp))
 		stream.XORKeyStream(buf.Bytes(), buf.Bytes())
-		mbuf.Write(buf.Bytes())
+		mbuf.PutSlice(buf.Bytes())
 		_, err = vc.Conn.Write(mbuf.Bytes())
 		return err
 	}
@@ -206,6 +202,7 @@ func newConn(conn net.Conn, id *ID, dst *DstAddr, security Security, isAead bool
 	copy(reqBodyIV[:], randBytes[:16])
 	copy(reqBodyKey[:], randBytes[16:32])
 	respV := randBytes[32]
+	option := OptionChunkStream
 
 	var (
 		respBodyKey []byte
@@ -227,6 +224,16 @@ func newConn(conn net.Conn, id *ID, dst *DstAddr, security Security, isAead bool
 	var writer io.Writer
 	var reader io.Reader
 	switch security {
+	case SecurityZero:
+		security = SecurityNone
+		if !dst.UDP {
+			reader = conn
+			writer = conn
+			option = 0
+		} else {
+			reader = newChunkReader(conn)
+			writer = newChunkWriter(conn)
+		}
 	case SecurityNone:
 		reader = newChunkReader(conn)
 		writer = newChunkWriter(conn)
@@ -267,6 +274,7 @@ func newConn(conn net.Conn, id *ID, dst *DstAddr, security Security, isAead bool
 		reader:      reader,
 		writer:      writer,
 		security:    security,
+		option:      option,
 		isAead:      isAead,
 	}
 	if err := c.sendRequest(); err != nil {

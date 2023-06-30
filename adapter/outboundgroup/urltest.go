@@ -58,7 +58,7 @@ func (u *URLTest) Unwrap(metadata *C.Metadata) C.Proxy {
 }
 
 func (u *URLTest) proxies(touch bool) []C.Proxy {
-	elm, _, _ := u.single.Do(func() (interface{}, error) {
+	elm, _, _ := u.single.Do(func() (any, error) {
 		return getProvidersProxies(u.providers, touch), nil
 	})
 
@@ -66,7 +66,7 @@ func (u *URLTest) proxies(touch bool) []C.Proxy {
 }
 
 func (u *URLTest) fast(touch bool) C.Proxy {
-	elm, _, _ := u.fastSingle.Do(func() (interface{}, error) {
+	elm, _, shared := u.fastSingle.Do(func() (any, error) {
 		proxies := u.proxies(touch)
 		fast := proxies[0]
 		min := fast.LastDelay()
@@ -95,6 +95,9 @@ func (u *URLTest) fast(touch bool) C.Proxy {
 
 		return u.fastNode, nil
 	})
+	if shared && touch { // a shared fastSingle.Do() may cause providers untouched, so we touch them again
+		touchProviders(u.providers)
+	}
 
 	return elm.(C.Proxy)
 }
@@ -114,21 +117,19 @@ func (u *URLTest) MarshalJSON() ([]byte, error) {
 	for _, proxy := range u.proxies(false) {
 		all = append(all, proxy.Name())
 	}
-	return json.Marshal(map[string]interface{}{
+	return json.Marshal(map[string]any{
 		"type": u.Type().String(),
 		"now":  u.Now(),
 		"all":  all,
 	})
 }
 
-func parseURLTestOption(config map[string]interface{}) []urlTestOption {
+func parseURLTestOption(config map[string]any) []urlTestOption {
 	opts := []urlTestOption{}
 
 	// tolerance
-	if elm, ok := config["tolerance"]; ok {
-		if tolerance, ok := elm.(int); ok {
-			opts = append(opts, urlTestWithTolerance(uint16(tolerance)))
-		}
+	if tolerance, ok := config["tolerance"].(int); ok {
+		opts = append(opts, urlTestWithTolerance(uint16(tolerance)))
 	}
 
 	return opts

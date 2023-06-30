@@ -2,28 +2,16 @@ package tunnel
 
 import (
 	"errors"
-	"io"
 	"net"
+	"net/netip"
 	"time"
 
 	N "github.com/Dreamacro/clash/common/net"
 	"github.com/Dreamacro/clash/common/pool"
-	"github.com/Dreamacro/clash/component/resolver"
 	C "github.com/Dreamacro/clash/constant"
 )
 
 func handleUDPToRemote(packet C.UDPPacket, pc C.PacketConn, metadata *C.Metadata) error {
-	defer packet.Drop()
-
-	// local resolve UDP dns
-	if !metadata.Resolved() {
-		ip, err := resolver.ResolveIP(metadata.Host)
-		if err != nil {
-			return err
-		}
-		metadata.DstIP = ip
-	}
-
 	addr := metadata.UDPAddr()
 	if addr == nil {
 		return errors.New("udp addr invalid")
@@ -38,7 +26,7 @@ func handleUDPToRemote(packet C.UDPPacket, pc C.PacketConn, metadata *C.Metadata
 	return nil
 }
 
-func handleUDPToLocal(packet C.UDPPacket, pc net.PacketConn, key string, fAddr net.Addr) {
+func handleUDPToLocal(packet C.UDPPacket, pc net.PacketConn, key string, oAddr, fAddr netip.Addr) {
 	buf := pool.Get(pool.UDPBufferSize)
 	defer pool.Put(buf)
 	defer natTable.Delete(key)
@@ -51,11 +39,16 @@ func handleUDPToLocal(packet C.UDPPacket, pc net.PacketConn, key string, fAddr n
 			return
 		}
 
-		if fAddr != nil {
-			from = fAddr
+		fromUDPAddr := *from.(*net.UDPAddr)
+		if fAddr.IsValid() {
+			fromAddr, _ := netip.AddrFromSlice(fromUDPAddr.IP)
+			fromAddr = fromAddr.Unmap()
+			if oAddr == fromAddr {
+				fromUDPAddr.IP = fAddr.AsSlice()
+			}
 		}
 
-		_, err = packet.WriteBack(buf[:n], from)
+		_, err = packet.WriteBack(buf[:n], &fromUDPAddr)
 		if err != nil {
 			return
 		}
@@ -63,26 +56,5 @@ func handleUDPToLocal(packet C.UDPPacket, pc net.PacketConn, key string, fAddr n
 }
 
 func handleSocket(ctx C.ConnContext, outbound net.Conn) {
-	relay(ctx.Conn(), outbound)
-}
-
-// relay copies between left and right bidirectionally.
-func relay(leftConn, rightConn net.Conn) {
-	ch := make(chan error)
-
-	go func() {
-		buf := pool.Get(pool.RelayBufferSize)
-		// Wrapping to avoid using *net.TCPConn.(ReadFrom)
-		// See also https://github.com/Dreamacro/clash/pull/1209
-		_, err := io.CopyBuffer(N.WriteOnlyWriter{Writer: leftConn}, N.ReadOnlyReader{Reader: rightConn}, buf)
-		pool.Put(buf)
-		leftConn.SetReadDeadline(time.Now())
-		ch <- err
-	}()
-
-	buf := pool.Get(pool.RelayBufferSize)
-	io.CopyBuffer(N.WriteOnlyWriter{Writer: rightConn}, N.ReadOnlyReader{Reader: leftConn}, buf)
-	pool.Put(buf)
-	rightConn.SetReadDeadline(time.Now())
-	<-ch
+	N.Relay(ctx.Conn(), outbound)
 }

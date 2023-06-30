@@ -6,8 +6,7 @@ import (
 	"time"
 
 	"github.com/Dreamacro/clash/component/pool"
-
-	"github.com/Dreamacro/go-shadowsocks2/shadowaead"
+	"github.com/Dreamacro/clash/transport/shadowsocks/shadowaead"
 )
 
 type Pool struct {
@@ -71,12 +70,12 @@ func (pc *PoolConn) Close() error {
 
 func NewPool(factory func(context.Context) (*Snell, error)) *Pool {
 	p := pool.New(
-		func(ctx context.Context) (interface{}, error) {
+		func(ctx context.Context) (any, error) {
 			return factory(ctx)
 		},
 		pool.WithAge(15000),
 		pool.WithSize(10),
-		pool.WithEvict(func(item interface{}) {
+		pool.WithEvict(func(item any) {
 			item.(*Snell).Close()
 		}),
 	)

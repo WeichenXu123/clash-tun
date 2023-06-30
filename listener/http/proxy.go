@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Dreamacro/clash/adapter/inbound"
 	"github.com/Dreamacro/clash/common/cache"
@@ -15,16 +14,11 @@ import (
 	"github.com/Dreamacro/clash/log"
 )
 
-func HandleConn(c net.Conn, in chan<- C.ConnContext, cache *cache.Cache) {
-	client := newClient(c.RemoteAddr(), in)
+func HandleConn(c net.Conn, in chan<- C.ConnContext, cache *cache.LruCache) {
+	client := newClient(c.RemoteAddr(), c.LocalAddr(), in)
 	defer client.CloseIdleConnections()
 
-	var conn *N.BufferedConn
-	if bufConn, ok := c.(*N.BufferedConn); ok {
-		conn = bufConn
-	} else {
-		conn = N.NewBufferedConn(c)
-	}
+	conn := N.NewBufferedConn(c)
 
 	keepAlive := true
 	trusted := cache == nil // disable authenticate if cache is nil
@@ -66,6 +60,12 @@ func HandleConn(c net.Conn, in chan<- C.ConnContext, cache *cache.Cache) {
 
 			request.RequestURI = ""
 
+			if isUpgradeRequest(request) {
+				handleUpgrade(conn, request, in)
+
+				return // hijack connection
+			}
+
 			removeHopByHopHeaders(request.Header)
 			removeExtraHTTPHostPort(request)
 
@@ -98,7 +98,7 @@ func HandleConn(c net.Conn, in chan<- C.ConnContext, cache *cache.Cache) {
 	conn.Close()
 }
 
-func authenticate(request *http.Request, cache *cache.Cache) *http.Response {
+func authenticate(request *http.Request, cache *cache.LruCache) *http.Response {
 	authenticator := authStore.Authenticator()
 	if authenticator != nil {
 		credential := parseBasicProxyAuthorization(request)
@@ -108,11 +108,11 @@ func authenticate(request *http.Request, cache *cache.Cache) *http.Response {
 			return resp
 		}
 
-		var authed interface{}
-		if authed = cache.Get(credential); authed == nil {
+		authed, exist := cache.Get(credential)
+		if !exist {
 			user, pass, err := decodeBasicProxyAuthorization(credential)
 			authed = err == nil && authenticator.Verify(user, pass)
-			cache.Put(credential, authed, time.Minute)
+			cache.Set(credential, authed)
 		}
 		if !authed.(bool) {
 			log.Infoln("Auth failed from %s", request.RemoteAddr)

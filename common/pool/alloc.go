@@ -23,7 +23,7 @@ func NewAllocator() *Allocator {
 	alloc.buffers = make([]sync.Pool, 17) // 1B -> 64K
 	for k := range alloc.buffers {
 		i := k
-		alloc.buffers[k].New = func() interface{} {
+		alloc.buffers[k].New = func() any {
 			return make([]byte, 1<<uint32(i))
 		}
 	}
@@ -52,8 +52,8 @@ func (alloc *Allocator) Put(buf []byte) error {
 		return errors.New("allocator Put() incorrect buffer size")
 	}
 
-	//lint:ignore SA6002 ignore temporarily
 	//nolint
+	//lint:ignore SA6002 ignore temporarily
 	alloc.buffers[bits].Put(buf)
 	return nil
 }

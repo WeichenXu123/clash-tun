@@ -28,8 +28,8 @@ func NewDecoder(option Option) *Decoder {
 	return &Decoder{option: &option}
 }
 
-// Decode transform a map[string]interface{} to a struct
-func (d *Decoder) Decode(src map[string]interface{}, dst interface{}) error {
+// Decode transform a map[string]any to a struct
+func (d *Decoder) Decode(src map[string]any, dst any) error {
 	if reflect.TypeOf(dst).Kind() != reflect.Ptr {
 		return fmt.Errorf("Decode must recive a ptr struct")
 	}
@@ -45,12 +45,8 @@ func (d *Decoder) Decode(src map[string]interface{}, dst interface{}) error {
 		}
 
 		tag := field.Tag.Get(d.option.TagName)
-		str := strings.SplitN(tag, ",", 2)
-		key := str[0]
-		omitempty := false
-		if len(str) > 1 {
-			omitempty = str[1] == "omitempty"
-		}
+		key, omitKey, found := strings.Cut(tag, ",")
+		omitempty := found && omitKey == "omitempty"
 
 		value, ok := src[key]
 		if !ok || value == nil {
@@ -68,7 +64,7 @@ func (d *Decoder) Decode(src map[string]interface{}, dst interface{}) error {
 	return nil
 }
 
-func (d *Decoder) decode(name string, data interface{}, val reflect.Value) error {
+func (d *Decoder) decode(name string, data any, val reflect.Value) error {
 	switch val.Kind() {
 	case reflect.Int:
 		return d.decodeInt(name, data, val)
@@ -89,12 +85,14 @@ func (d *Decoder) decode(name string, data interface{}, val reflect.Value) error
 	}
 }
 
-func (d *Decoder) decodeInt(name string, data interface{}, val reflect.Value) (err error) {
+func (d *Decoder) decodeInt(name string, data any, val reflect.Value) (err error) {
 	dataVal := reflect.ValueOf(data)
 	kind := dataVal.Kind()
 	switch {
 	case kind == reflect.Int:
 		val.SetInt(dataVal.Int())
+	case kind == reflect.Float64 && d.option.WeaklyTypedInput:
+		val.SetInt(int64(dataVal.Float()))
 	case kind == reflect.String && d.option.WeaklyTypedInput:
 		var i int64
 		i, err = strconv.ParseInt(dataVal.String(), 0, val.Type().Bits())
@@ -112,7 +110,7 @@ func (d *Decoder) decodeInt(name string, data interface{}, val reflect.Value) (e
 	return err
 }
 
-func (d *Decoder) decodeString(name string, data interface{}, val reflect.Value) (err error) {
+func (d *Decoder) decodeString(name string, data any, val reflect.Value) (err error) {
 	dataVal := reflect.ValueOf(data)
 	kind := dataVal.Kind()
 	switch {
@@ -129,7 +127,7 @@ func (d *Decoder) decodeString(name string, data interface{}, val reflect.Value)
 	return err
 }
 
-func (d *Decoder) decodeBool(name string, data interface{}, val reflect.Value) (err error) {
+func (d *Decoder) decodeBool(name string, data any, val reflect.Value) (err error) {
 	dataVal := reflect.ValueOf(data)
 	kind := dataVal.Kind()
 	switch {
@@ -146,7 +144,7 @@ func (d *Decoder) decodeBool(name string, data interface{}, val reflect.Value) (
 	return err
 }
 
-func (d *Decoder) decodeSlice(name string, data interface{}, val reflect.Value) error {
+func (d *Decoder) decodeSlice(name string, data any, val reflect.Value) error {
 	dataVal := reflect.Indirect(reflect.ValueOf(data))
 	valType := val.Type()
 	valElemType := valType.Elem()
@@ -161,9 +159,19 @@ func (d *Decoder) decodeSlice(name string, data interface{}, val reflect.Value) 
 		for valSlice.Len() <= i {
 			valSlice = reflect.Append(valSlice, reflect.Zero(valElemType))
 		}
-		currentField := valSlice.Index(i)
-
 		fieldName := fmt.Sprintf("%s[%d]", name, i)
+		if currentData == nil {
+			// in weakly type mode, null will convert to zero value
+			if d.option.WeaklyTypedInput {
+				continue
+			}
+			// in non-weakly type mode, null will convert to nil if element's zero value is nil, otherwise return an error
+			if elemKind := valElemType.Kind(); elemKind == reflect.Map || elemKind == reflect.Slice {
+				continue
+			}
+			return fmt.Errorf("'%s' can not be null", fieldName)
+		}
+		currentField := valSlice.Index(i)
 		if err := d.decode(fieldName, currentData, currentField); err != nil {
 			return err
 		}
@@ -173,7 +181,7 @@ func (d *Decoder) decodeSlice(name string, data interface{}, val reflect.Value) 
 	return nil
 }
 
-func (d *Decoder) decodeMap(name string, data interface{}, val reflect.Value) error {
+func (d *Decoder) decodeMap(name string, data any, val reflect.Value) error {
 	valType := val.Type()
 	valKeyType := valType.Key()
 	valElemType := valType.Elem()
@@ -245,7 +253,7 @@ func (d *Decoder) decodeMapFromMap(name string, dataVal reflect.Value, val refle
 	return nil
 }
 
-func (d *Decoder) decodeStruct(name string, data interface{}, val reflect.Value) error {
+func (d *Decoder) decodeStruct(name string, data any, val reflect.Value) error {
 	dataVal := reflect.Indirect(reflect.ValueOf(data))
 
 	// If the type of the value to write to and the data match directly,
@@ -273,7 +281,7 @@ func (d *Decoder) decodeStructFromMap(name string, dataVal, val reflect.Value) e
 	}
 
 	dataValKeys := make(map[reflect.Value]struct{})
-	dataValKeysUnused := make(map[interface{}]struct{})
+	dataValKeysUnused := make(map[any]struct{})
 	for _, dataValKey := range dataVal.MapKeys() {
 		dataValKeys[dataValKey] = struct{}{}
 		dataValKeysUnused[dataValKey.Interface()] = struct{}{}
@@ -398,7 +406,7 @@ func (d *Decoder) decodeStructFromMap(name string, dataVal, val reflect.Value) e
 	return nil
 }
 
-func (d *Decoder) setInterface(name string, data interface{}, val reflect.Value) (err error) {
+func (d *Decoder) setInterface(name string, data any, val reflect.Value) (err error) {
 	dataVal := reflect.ValueOf(data)
 	val.Set(dataVal)
 	return nil

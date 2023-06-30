@@ -4,208 +4,203 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"net"
+	"net/netip"
 	"os"
-	"path"
-	"strings"
-	"syscall"
-	"unicode"
 	"unsafe"
 
 	"github.com/Dreamacro/clash/common/pool"
+
+	"github.com/mdlayher/netlink"
+	"golang.org/x/sys/unix"
 )
 
-// from https://github.com/vishvananda/netlink/blob/bca67dfc8220b44ef582c9da4e9172bf1c9ec973/nl/nl_linux.go#L52-L62
-var nativeEndian = func() binary.ByteOrder {
-	var x uint32 = 0x01020304
-	if *(*byte)(unsafe.Pointer(&x)) == 0x01 {
-		return binary.BigEndian
-	}
+type inetDiagRequest struct {
+	Family   byte
+	Protocol byte
+	Ext      byte
+	Pad      byte
+	States   uint32
 
-	return binary.LittleEndian
-}()
+	SrcPort [2]byte
+	DstPort [2]byte
+	Src     [16]byte
+	Dst     [16]byte
+	If      uint32
+	Cookie  [2]uint32
+}
 
-const (
-	sizeOfSocketDiagRequest = syscall.SizeofNlMsghdr + 8 + 48
-	socketDiagByFamily      = 20
-	pathProc                = "/proc"
-)
+type inetDiagResponse struct {
+	Family  byte
+	State   byte
+	Timer   byte
+	ReTrans byte
 
-func findProcessName(network string, ip net.IP, srcPort int) (string, error) {
-	inode, uid, err := resolveSocketByNetlink(network, ip, srcPort)
+	SrcPort [2]byte
+	DstPort [2]byte
+	Src     [16]byte
+	Dst     [16]byte
+	If      uint32
+	Cookie  [2]uint32
+
+	Expires uint32
+	RQueue  uint32
+	WQueue  uint32
+	UID     uint32
+	INode   uint32
+}
+
+func findProcessPath(network string, from netip.AddrPort, to netip.AddrPort) (string, error) {
+	inode, uid, err := resolveSocketByNetlink(network, from, to)
 	if err != nil {
 		return "", err
 	}
 
-	return resolveProcessNameByProcSearch(inode, uid)
+	return resolveProcessPathByProcSearch(inode, uid)
 }
 
-func resolveSocketByNetlink(network string, ip net.IP, srcPort int) (int32, int32, error) {
-	var family byte
-	var protocol byte
+func resolveSocketByNetlink(network string, from netip.AddrPort, to netip.AddrPort) (inode uint32, uid uint32, err error) {
+	request := &inetDiagRequest{
+		States: 0xffffffff,
+		Cookie: [2]uint32{0xffffffff, 0xffffffff},
+	}
 
+	if from.Addr().Is4() {
+		request.Family = unix.AF_INET
+	} else {
+		request.Family = unix.AF_INET6
+	}
+
+	// Swap src & dst for udp
+	// See also https://www.mail-archive.com/netdev@vger.kernel.org/msg248638.html
 	switch network {
 	case TCP:
-		protocol = syscall.IPPROTO_TCP
+		request.Protocol = unix.IPPROTO_TCP
+
+		copy(request.Src[:], from.Addr().AsSlice())
+		copy(request.Dst[:], to.Addr().AsSlice())
+
+		binary.BigEndian.PutUint16(request.SrcPort[:], from.Port())
+		binary.BigEndian.PutUint16(request.DstPort[:], to.Port())
 	case UDP:
-		protocol = syscall.IPPROTO_UDP
+		request.Protocol = unix.IPPROTO_UDP
+
+		copy(request.Dst[:], from.Addr().AsSlice())
+		copy(request.Src[:], to.Addr().AsSlice())
+
+		binary.BigEndian.PutUint16(request.DstPort[:], from.Port())
+		binary.BigEndian.PutUint16(request.SrcPort[:], to.Port())
 	default:
 		return 0, 0, ErrInvalidNetwork
 	}
 
-	if ip.To4() != nil {
-		family = syscall.AF_INET
-	} else {
-		family = syscall.AF_INET6
-	}
-
-	req := packSocketDiagRequest(family, protocol, ip, uint16(srcPort))
-
-	socket, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_DGRAM, syscall.NETLINK_INET_DIAG)
+	conn, err := netlink.Dial(unix.NETLINK_INET_DIAG, nil)
 	if err != nil {
-		return 0, 0, fmt.Errorf("dial netlink: %w", err)
+		return 0, 0, err
 	}
-	defer syscall.Close(socket)
+	defer conn.Close()
 
-	syscall.SetsockoptTimeval(socket, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &syscall.Timeval{Usec: 100})
-	syscall.SetsockoptTimeval(socket, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &syscall.Timeval{Usec: 100})
+	message := netlink.Message{
+		Header: netlink.Header{
+			Type:  20, // SOCK_DIAG_BY_FAMILY
+			Flags: netlink.Request,
+		},
+		Data: (*(*[unsafe.Sizeof(*request)]byte)(unsafe.Pointer(request)))[:],
+	}
 
-	if err := syscall.Connect(socket, &syscall.SockaddrNetlink{
-		Family: syscall.AF_NETLINK,
-		Pad:    0,
-		Pid:    0,
-		Groups: 0,
-	}); err != nil {
+	messages, err := conn.Execute(message)
+	if err != nil {
 		return 0, 0, err
 	}
 
-	if _, err := syscall.Write(socket, req); err != nil {
-		return 0, 0, fmt.Errorf("write request: %w", err)
+	for _, msg := range messages {
+		if len(msg.Data) < int(unsafe.Sizeof(inetDiagResponse{})) {
+			continue
+		}
+
+		response := (*inetDiagResponse)(unsafe.Pointer(&msg.Data[0]))
+
+		return response.INode, response.UID, nil
 	}
 
-	rb := pool.Get(pool.RelayBufferSize)
-	defer pool.Put(rb)
+	return 0, 0, ErrNotFound
+}
 
-	n, err := syscall.Read(socket, rb)
+func resolveProcessPathByProcSearch(inode, uid uint32) (string, error) {
+	procDir, err := os.Open("/proc")
 	if err != nil {
-		return 0, 0, fmt.Errorf("read response: %w", err)
+		return "", err
 	}
+	defer procDir.Close()
 
-	messages, err := syscall.ParseNetlinkMessage(rb[:n])
-	if err != nil {
-		return 0, 0, fmt.Errorf("parse netlink message: %w", err)
-	} else if len(messages) == 0 {
-		return 0, 0, fmt.Errorf("unexcepted netlink response")
-	}
-
-	message := messages[0]
-	if message.Header.Type&syscall.NLMSG_ERROR != 0 {
-		return 0, 0, fmt.Errorf("netlink message: NLMSG_ERROR")
-	}
-
-	uid, inode := unpackSocketDiagResponse(&messages[0])
-	if uid < 0 || inode < 0 {
-		return 0, 0, fmt.Errorf("invalid uid(%d) or inode(%d)", uid, inode)
-	}
-
-	return uid, inode, nil
-}
-
-func packSocketDiagRequest(family, protocol byte, source net.IP, sourcePort uint16) []byte {
-	s := make([]byte, 16)
-
-	if v4 := source.To4(); v4 != nil {
-		copy(s, v4)
-	} else {
-		copy(s, source)
-	}
-
-	buf := make([]byte, sizeOfSocketDiagRequest)
-
-	nativeEndian.PutUint32(buf[0:4], sizeOfSocketDiagRequest)
-	nativeEndian.PutUint16(buf[4:6], socketDiagByFamily)
-	nativeEndian.PutUint16(buf[6:8], syscall.NLM_F_REQUEST|syscall.NLM_F_DUMP)
-	nativeEndian.PutUint32(buf[8:12], 0)
-	nativeEndian.PutUint32(buf[12:16], 0)
-
-	buf[16] = family
-	buf[17] = protocol
-	buf[18] = 0
-	buf[19] = 0
-	nativeEndian.PutUint32(buf[20:24], 0xFFFFFFFF)
-
-	binary.BigEndian.PutUint16(buf[24:26], sourcePort)
-	binary.BigEndian.PutUint16(buf[26:28], 0)
-
-	copy(buf[28:44], s)
-	copy(buf[44:60], net.IPv6zero)
-
-	nativeEndian.PutUint32(buf[60:64], 0)
-	nativeEndian.PutUint64(buf[64:72], 0xFFFFFFFFFFFFFFFF)
-
-	return buf
-}
-
-func unpackSocketDiagResponse(msg *syscall.NetlinkMessage) (inode, uid int32) {
-	if len(msg.Data) < 72 {
-		return 0, 0
-	}
-
-	data := msg.Data
-
-	uid = int32(nativeEndian.Uint32(data[64:68]))
-	inode = int32(nativeEndian.Uint32(data[68:72]))
-
-	return
-}
-
-func resolveProcessNameByProcSearch(inode, uid int32) (string, error) {
-	files, err := os.ReadDir(pathProc)
+	pids, err := procDir.Readdirnames(-1)
 	if err != nil {
 		return "", err
 	}
 
-	buffer := make([]byte, syscall.PathMax)
-	socket := []byte(fmt.Sprintf("socket:[%d]", inode))
+	expectedSocketName := fmt.Appendf(nil, "socket:[%d]", inode)
 
-	for _, f := range files {
-		if !f.IsDir() || !isPid(f.Name()) {
+	pathBuffer := pool.Get(64)
+	defer pool.Put(pathBuffer)
+
+	readlinkBuffer := pool.Get(32)
+	defer pool.Put(readlinkBuffer)
+
+	copy(pathBuffer, "/proc/")
+
+	for _, pid := range pids {
+		if !isPid(pid) {
 			continue
 		}
 
-		info, err := f.Info()
+		pathBuffer = append(pathBuffer[:len("/proc/")], pid...)
+
+		stat := &unix.Stat_t{}
+		err = unix.Stat(string(pathBuffer), stat)
 		if err != nil {
-			return "", err
-		}
-		if info.Sys().(*syscall.Stat_t).Uid != uint32(uid) {
+			continue
+		} else if stat.Uid != uid {
 			continue
 		}
 
-		processPath := path.Join(pathProc, f.Name())
-		fdPath := path.Join(processPath, "fd")
+		pathBuffer = append(pathBuffer, "/fd/"...)
+		fdsPrefixLength := len(pathBuffer)
 
-		fds, err := os.ReadDir(fdPath)
+		fdDir, err := os.Open(string(pathBuffer))
+		if err != nil {
+			continue
+		}
+
+		fds, err := fdDir.Readdirnames(-1)
+		fdDir.Close()
 		if err != nil {
 			continue
 		}
 
 		for _, fd := range fds {
-			n, err := syscall.Readlink(path.Join(fdPath, fd.Name()), buffer)
+			pathBuffer = pathBuffer[:fdsPrefixLength]
+
+			pathBuffer = append(pathBuffer, fd...)
+
+			n, err := unix.Readlink(string(pathBuffer), readlinkBuffer)
 			if err != nil {
 				continue
 			}
 
-			if bytes.Equal(buffer[:n], socket) {
-				return os.Readlink(path.Join(processPath, "exe"))
+			if bytes.Equal(readlinkBuffer[:n], expectedSocketName) {
+				return os.Readlink("/proc/" + pid + "/exe")
 			}
 		}
 	}
 
-	return "", fmt.Errorf("process of uid(%d),inode(%d) not found", uid, inode)
+	return "", fmt.Errorf("inode %d of uid %d not found", inode, uid)
 }
 
-func isPid(s string) bool {
-	return strings.IndexFunc(s, func(r rune) bool {
-		return !unicode.IsDigit(r)
-	}) == -1
+func isPid(name string) bool {
+	for _, c := range name {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+
+	return true
 }
