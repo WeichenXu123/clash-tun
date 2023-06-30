@@ -1,3 +1,4 @@
+//go:build darwin
 // +build darwin
 
 package dev
@@ -17,8 +18,8 @@ import (
 
 	"github.com/Dreamacro/clash/common/pool"
 	"github.com/Dreamacro/clash/log"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -231,17 +232,18 @@ func (t *tunDarwin) AsLinkEndpoint() (result stack.LinkEndpoint, err error) {
 	// start Read loop. read ip packet from tun and write it to ipstack
 	t.wg.Add(1)
 	go func() {
+		readBuf := make([]byte, mtu)
 		for {
-			packet := make([]byte, mtu)
-			n, err := t.Read(packet)
+			n, err := t.Read(readBuf)
 			if err != nil {
 				if !t.closed {
 					log.Errorln("can not read from tun: %v", err)
 				}
 				break
 			}
+
 			var p tcpip.NetworkProtocolNumber
-			switch header.IPVersion(packet) {
+			switch header.IPVersion(readBuf) {
 			case header.IPv4Version:
 				p = header.IPv4ProtocolNumber
 			case header.IPv6Version:
@@ -249,11 +251,12 @@ func (t *tunDarwin) AsLinkEndpoint() (result stack.LinkEndpoint, err error) {
 			}
 			if linkEP.IsAttached() {
 				linkEP.InjectInbound(p, stack.NewPacketBuffer(stack.PacketBufferOptions{
-					Data: buffer.View(packet[:n]).ToVectorisedView(),
+					Payload: buffer.MakeWithData(readBuf[:n]),
 				}))
 			} else {
 				log.Debugln("received packet from tun when %s is not attached to any dispatcher.", t.Name())
 			}
+
 		}
 		t.wg.Done()
 		t.Close()
@@ -303,20 +306,14 @@ func (t *tunDarwin) Write(buff []byte) (int, error) {
 }
 
 func (t *tunDarwin) WriteNotify() {
-	packet, ok := t.linkCache.Read()
-	if ok {
-		var vv buffer.VectorisedView
-		// Append upper headers.
-		vv.AppendView(packet.Pkt.NetworkHeader().View())
-		vv.AppendView(packet.Pkt.TransportHeader().View())
-		// Append data payload.
-		vv.Append(packet.Pkt.Data().ExtractVV())
+	packet := t.linkCache.Read()
 
-		_, err := t.Write(vv.ToView())
-		if err != nil {
-			log.Errorln("can not read from tun: %v", err)
-		}
+	_, err := t.Write(packet.ToView().AsSlice())
+	packet.DecRef()
+	if err != nil {
+		log.Errorln("can not read from tun: %v", err)
 	}
+
 }
 
 func (t *tunDarwin) Close() {

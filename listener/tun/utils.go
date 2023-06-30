@@ -5,16 +5,17 @@ import (
 	"net"
 
 	"github.com/Dreamacro/clash/component/resolver"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
 type fakeConn struct {
-	id      stack.TransportEndpointID // The endpoint of incomming packet, it's remote address is the source address it sent from
-	pkt     *stack.PacketBuffer       // The original packet comming from tun
+	id      stack.TransportEndpointID // The endpoint of incoming packet, it's remote address is the source address it sent from
+	pkt     *stack.PacketBuffer       // The original packet coming from tun
 	s       *stack.Stack
 	payload []byte
 	fakeip  *bool
@@ -25,8 +26,7 @@ func (c *fakeConn) Data() []byte {
 }
 
 func (c *fakeConn) WriteBack(b []byte, addr net.Addr) (n int, err error) {
-	v := buffer.View(b)
-	data := v.ToVectorisedView()
+	data := buffer.NewViewWithData(b)
 
 	var localAddress tcpip.Address
 	var localPort uint16
@@ -36,7 +36,7 @@ func (c *fakeConn) WriteBack(b []byte, addr net.Addr) (n int, err error) {
 		localPort = c.id.LocalPort
 	} else {
 		udpaddr, _ := addr.(*net.UDPAddr)
-		localAddress = tcpip.Address(udpaddr.IP)
+		localAddress = tcpip.AddrFromSlice(udpaddr.IP)
 		localPort = uint16(udpaddr.Port)
 	}
 
@@ -45,7 +45,7 @@ func (c *fakeConn) WriteBack(b []byte, addr net.Addr) (n int, err error) {
 }
 
 func (c *fakeConn) LocalAddr() net.Addr {
-	return &net.UDPAddr{IP: net.IP(c.id.RemoteAddress), Port: int(c.id.RemotePort)}
+	return &net.UDPAddr{IP: net.IP(c.id.RemoteAddress.AsSlice()), Port: int(c.id.RemotePort)}
 }
 
 func (c *fakeConn) Close() error {
@@ -60,18 +60,18 @@ func (c *fakeConn) FakeIP() bool {
 	if c.fakeip != nil {
 		return *c.fakeip
 	}
-	fakeip := resolver.IsFakeIP(net.IP(c.id.LocalAddress.To4()))
+	fakeip := resolver.IsFakeIP(net.IP(c.id.LocalAddress.AsSlice()))
 	c.fakeip = &fakeip
 	return fakeip
 }
 
-func writeUDP(r *stack.Route, data buffer.VectorisedView, localPort, remotePort uint16) (int, error) {
+func writeUDP(r *stack.Route, data *buffer.View, localPort, remotePort uint16) (int, error) {
 	const protocol = udp.ProtocolNumber
 	// Allocate a buffer for the UDP header.
 
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		ReserveHeaderBytes: header.UDPMinimumSize + int(r.MaxHeaderLength()),
-		Data:               data,
+		Payload:            buffer.MakeWithView(data),
 	})
 
 	// Initialize the header.
@@ -89,10 +89,8 @@ func writeUDP(r *stack.Route, data buffer.VectorisedView, localPort, remotePort 
 	// transmitter skipped the checksum generation (RFC768).
 	// On IPv6, UDP checksum is not optional (RFC2460 Section 8.1).
 	if r.RequiresTXTransportChecksum() {
-		xsum := r.PseudoHeaderChecksum(protocol, length)
-		for _, v := range data.Views() {
-			xsum = header.Checksum(v, xsum)
-		}
+
+		xsum := checksum.Combine(r.PseudoHeaderChecksum(protocol, length), pkt.Data().Checksum()) // FIXME: check this logic
 		udp.SetChecksum(^udp.CalculateChecksum(xsum))
 	}
 

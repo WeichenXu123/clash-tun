@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/url"
 	"strconv"
-	"strings"
 
 	"github.com/Dreamacro/clash/adapter/inbound"
 	C "github.com/Dreamacro/clash/constant"
@@ -78,10 +77,8 @@ func NewTunProxy(deviceURL string, tcpIn chan<- C.ConnContext, udpIn chan<- *inb
 
 	// Add route for ipv4 & ipv6
 	// So FindRoute will return correct route to tun NIC
-	subnet, _ := tcpip.NewSubnet(tcpip.Address(strings.Repeat("\x00", 4)), tcpip.AddressMask(strings.Repeat("\x00", 4)))
-	ipstack.AddRoute(tcpip.Route{Destination: subnet, Gateway: "", NIC: nicID})
-	subnet, _ = tcpip.NewSubnet(tcpip.Address(strings.Repeat("\x00", 16)), tcpip.AddressMask(strings.Repeat("\x00", 16)))
-	ipstack.AddRoute(tcpip.Route{Destination: subnet, Gateway: "", NIC: nicID})
+	ipstack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, Gateway: tcpip.Address{}, NIC: nicID})
+	ipstack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, Gateway: tcpip.Address{}, NIC: nicID})
 
 	// TCP handler
 	// maximum number of half-open tcp connection set to 1024
@@ -139,7 +136,7 @@ func (t *tunAdapter) DeviceURL() string {
 
 func (t *tunAdapter) udpHandlePacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
 	// ref: gvisor pkg/tcpip/transport/udp/endpoint.go HandlePacket
-	hdr := header.UDP(pkt.TransportHeader().View())
+	hdr := header.UDP(pkt.TransportHeader().Slice())
 	if int(hdr.Length()) > pkt.Data().Size()+header.UDPMinimumSize {
 		// Malformed packet.
 		t.ipstack.Stats().UDP.MalformedPacketsReceived.Increment()
@@ -152,30 +149,30 @@ func (t *tunAdapter) udpHandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
 		id:      id,
 		pkt:     pkt,
 		s:       t.ipstack,
-		payload: pkt.Data().AsRange().ToOwnedView(),
+		payload: pkt.Data().AsRange().ToSlice(),
 	}
-	t.udpInbound <- inbound.NewPacket(target, packet, C.TUN)
+	t.udpInbound <- inbound.NewPacket(target, target.UDPAddr(), packet, C.TUN)
 
 	return true
 }
 
 func getAddr(id stack.TransportEndpointID) socks5.Addr {
-	ipv4 := id.LocalAddress.To4()
+	local_addr := id.LocalAddress
 
 	// get the big-endian binary represent of port
 	port := make([]byte, 2)
 	binary.BigEndian.PutUint16(port, id.LocalPort)
 
-	if ipv4 != "" {
+	if local_addr.Len() == 4 {
 		addr := make([]byte, 1+net.IPv4len+2)
 		addr[0] = socks5.AtypIPv4
-		copy(addr[1:1+net.IPv4len], []byte(ipv4))
+		copy(addr[1:1+net.IPv4len], local_addr.AsSlice())
 		addr[1+net.IPv4len], addr[1+net.IPv4len+1] = port[0], port[1]
 		return addr
 	} else {
 		addr := make([]byte, 1+net.IPv6len+2)
 		addr[0] = socks5.AtypIPv6
-		copy(addr[1:1+net.IPv6len], []byte(id.LocalAddress))
+		copy(addr[1:1+net.IPv6len], local_addr.AsSlice())
 		addr[1+net.IPv6len], addr[1+net.IPv6len+1] = port[0], port[1]
 		return addr
 	}

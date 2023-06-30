@@ -7,9 +7,9 @@ import (
 	"github.com/Dreamacro/clash/dns"
 	"github.com/Dreamacro/clash/log"
 	D "github.com/miekg/dns"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
-	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
@@ -19,8 +19,8 @@ import (
 )
 
 var (
-	ipv4Zero = tcpip.Address(net.IPv4zero.To4())
-	ipv6Zero = tcpip.Address(net.IPv6zero.To16())
+	ipv4Zero = tcpip.AddrFrom4Slice(net.IPv4zero.To4())
+	ipv6Zero = tcpip.AddrFrom16Slice(net.IPv6zero.To16())
 )
 
 // DNSServer is DNS Server listening on tun devcice
@@ -55,7 +55,7 @@ func (e *dnsEndpoint) UniqueID() uint64 {
 }
 
 func (e *dnsEndpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) {
-	hdr := header.UDP(pkt.TransportHeader().View())
+	hdr := header.UDP(pkt.TransportHeader().View().AsSlice())
 	if int(hdr.Length()) > pkt.Data().Size()+header.UDPMinimumSize {
 		// Malformed packet.
 		e.stack.Stats().UDP.MalformedPacketsReceived.Increment()
@@ -64,7 +64,7 @@ func (e *dnsEndpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pack
 
 	// server DNS
 	var msg D.Msg
-	msg.Unpack(pkt.Data().AsRange().ToOwnedView())
+	msg.Unpack(pkt.Data().AsRange().ToView().AsSlice())
 	writer := dnsResponseWriter{s: e.stack, pkt: pkt, id: id}
 	go e.server.ServeDNS(&writer, &msg)
 }
@@ -87,11 +87,11 @@ func (e *dnsEndpoint) Abort() {
 }
 
 func (w *dnsResponseWriter) LocalAddr() net.Addr {
-	return &net.UDPAddr{IP: net.IP(w.id.LocalAddress), Port: int(w.id.LocalPort)}
+	return &net.UDPAddr{IP: net.IP(w.id.LocalAddress.AsSlice()), Port: int(w.id.LocalPort)}
 }
 
 func (w *dnsResponseWriter) RemoteAddr() net.Addr {
-	return &net.UDPAddr{IP: net.IP(w.id.RemoteAddress), Port: int(w.id.RemotePort)}
+	return &net.UDPAddr{IP: net.IP(w.id.RemoteAddress.AsSlice()), Port: int(w.id.RemotePort)}
 }
 
 func (w *dnsResponseWriter) WriteMsg(msg *D.Msg) error {
@@ -114,9 +114,7 @@ func (w *dnsResponseWriter) Hijack() {
 }
 
 func (w *dnsResponseWriter) Write(b []byte) (int, error) {
-	v := buffer.NewView(len(b))
-	copy(v, b)
-	data := v.ToVectorisedView()
+	data := buffer.NewViewWithData(b)
 	// w.id.LocalAddress is the source ip of DNS response
 	r, _ := w.s.FindRoute(w.pkt.NICID, w.id.LocalAddress, w.id.RemoteAddress, w.pkt.NetworkProtocolNumber, false /* multicastLoop */)
 	return writeUDP(r, data, w.id.LocalPort, w.id.RemotePort)
@@ -136,12 +134,12 @@ func CreateDNSServer(s *stack.Stack, resolver *dns.Resolver, mapper *dns.Resolve
 	var protocol tcpip.NetworkProtocolNumber
 	if ip.To4() != nil {
 		v4 = true
-		address.Addr = tcpip.Address(ip.To4())
+		address.Addr = tcpip.AddrFrom4Slice(ip.To4())
 		protocol = ipv4.ProtocolNumber
 
 	} else {
 		v4 = false
-		address.Addr = tcpip.Address(ip.To16())
+		address.Addr = tcpip.AddrFrom16Slice(ip.To16())
 		protocol = ipv6.ProtocolNumber
 	}
 	protocolAddr := tcpip.ProtocolAddress{
@@ -154,7 +152,7 @@ func CreateDNSServer(s *stack.Stack, resolver *dns.Resolver, mapper *dns.Resolve
 	}
 
 	if address.Addr == ipv4Zero || address.Addr == ipv6Zero {
-		address.Addr = ""
+		address.Addr = tcpip.Address{}
 	}
 
 	handler := dns.NewHandler(resolver, mapper)
@@ -166,7 +164,7 @@ func CreateDNSServer(s *stack.Stack, resolver *dns.Resolver, mapper *dns.Resolve
 		LocalAddress:  address.Addr,
 		LocalPort:     uint16(port),
 		RemotePort:    0,
-		RemoteAddress: "",
+		RemoteAddress: tcpip.Address{},
 	}
 
 	// TransportEndpoint for DNS
