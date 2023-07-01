@@ -37,6 +37,10 @@ func (c *fakeConn) WriteBack(b []byte, addr net.Addr) (n int, err error) {
 	} else {
 		udpaddr, _ := addr.(*net.UDPAddr)
 		localAddress = tcpip.AddrFromSlice(udpaddr.IP)
+		// We may get 4-in-6 IP here, but should not use 16 bytes IP in FindRoute
+		if c.pkt.NetworkProtocolNumber == header.IPv4ProtocolNumber {
+			localAddress = localAddress.To4()
+		}
 		localPort = uint16(udpaddr.Port)
 	}
 

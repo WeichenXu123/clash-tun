@@ -355,6 +355,7 @@ func ReCreateTun(conf config.Tun, tcpIn chan<- C.ConnContext, udpIn chan<- *inbo
 	}
 	tunAdapter.ReCreateDNSServer(conf.DNSListen)
 }
+
 func ResetDNSResolver(resolver *dns.Resolver, mapper *dns.ResolverEnhancer) {
 	if tunAdapter != nil {
 		tunAdapter.ResetDNSResolver(resolver, mapper)
