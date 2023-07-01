@@ -23,24 +23,26 @@ var (
 	ipv6Zero = tcpip.AddrFrom16Slice(net.IPv6zero.To16())
 )
 
-// DNSServer is DNS Server listening on tun devcice
+// DNSServer is DNS Server listening on tun device
 type DNSServer struct {
 	*dns.Server
+
 	resolver *dns.Resolver
+	mapper   *dns.ResolverEnhancer
 
 	stack         *stack.Stack
 	tcpListener   net.Listener
-	udpEndpoint   *dnsEndpoint
+	udpEndpoint   *dnsUDPEndpoint
 	udpEndpointID *stack.TransportEndpointID
 	tcpip.NICID
 }
 
-// dnsEndpoint is a TransportEndpoint that will register to stack
-type dnsEndpoint struct {
+// dnsUDPEndpoint is a TransportEndpoint that will register to stack
+type dnsUDPEndpoint struct {
 	stack.TransportEndpoint
 	stack    *stack.Stack
 	uniqueID uint64
-	server   *dns.Server
+	ServeDNS func(w D.ResponseWriter, r *D.Msg)
 }
 
 // Keep track of the source of DNS request
@@ -50,11 +52,11 @@ type dnsResponseWriter struct {
 	id  stack.TransportEndpointID
 }
 
-func (e *dnsEndpoint) UniqueID() uint64 {
+func (e *dnsUDPEndpoint) UniqueID() uint64 {
 	return e.uniqueID
 }
 
-func (e *dnsEndpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) {
+func (e *dnsUDPEndpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) {
 	hdr := header.UDP(pkt.TransportHeader().View().AsSlice())
 	if int(hdr.Length()) > pkt.Data().Size()+header.UDPMinimumSize {
 		// Malformed packet.
@@ -62,27 +64,31 @@ func (e *dnsEndpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pack
 		return
 	}
 
+	// Resolver is not set
+	if e.ServeDNS == nil {
+		return
+	}
 	// server DNS
 	var msg D.Msg
 	msg.Unpack(pkt.Data().AsRange().ToView().AsSlice())
 	writer := dnsResponseWriter{s: e.stack, pkt: pkt, id: id}
-	go e.server.ServeDNS(&writer, &msg)
+	go e.ServeDNS(&writer, &msg)
 }
 
-func (e *dnsEndpoint) Close() {
+func (e *dnsUDPEndpoint) Close() {
 }
 
-func (e *dnsEndpoint) Wait() {
+func (e *dnsUDPEndpoint) Wait() {
 
 }
 
-func (e *dnsEndpoint) HandleError(transErr stack.TransportError, pkt *stack.PacketBuffer) {
+func (e *dnsUDPEndpoint) HandleError(transErr stack.TransportError, pkt *stack.PacketBuffer) {
 	log.Warnln("DNS endpoint get a transport error: %v", transErr)
 	log.Debugln("DNS endpoint transport error packet : %v", pkt)
 }
 
 // Abort implements stack.TransportEndpoint.Abort.
-func (e *dnsEndpoint) Abort() {
+func (e *dnsUDPEndpoint) Abort() {
 	e.Close()
 }
 
@@ -125,7 +131,7 @@ func (w *dnsResponseWriter) Close() error {
 }
 
 // CreateDNSServer create a dns server on given netstack
-func CreateDNSServer(s *stack.Stack, resolver *dns.Resolver, mapper *dns.ResolverEnhancer, ip net.IP, port int, nicID tcpip.NICID) (*DNSServer, error) {
+func CreateDNSServer(s *stack.Stack /*resolver *dns.Resolver, mapper *dns.ResolverEnhancer, */, ip net.IP, port int, nicID tcpip.NICID) (*DNSServer, error) {
 
 	var v4 bool
 	var err error
@@ -155,10 +161,6 @@ func CreateDNSServer(s *stack.Stack, resolver *dns.Resolver, mapper *dns.Resolve
 		address.Addr = tcpip.Address{}
 	}
 
-	handler := dns.NewHandler(resolver, mapper)
-	serverIn := &dns.Server{}
-	serverIn.SetHandler(handler)
-
 	// UDP DNS
 	id := &stack.TransportEndpointID{
 		LocalAddress:  address.Addr,
@@ -168,10 +170,9 @@ func CreateDNSServer(s *stack.Stack, resolver *dns.Resolver, mapper *dns.Resolve
 	}
 
 	// TransportEndpoint for DNS
-	endpoint := &dnsEndpoint{
+	endpoint := &dnsUDPEndpoint{
 		stack:    s,
 		uniqueID: s.UniqueID(),
-		server:   serverIn,
 	}
 
 	if tcpiperr := s.RegisterTransportEndpoint(
@@ -199,20 +200,12 @@ func CreateDNSServer(s *stack.Stack, resolver *dns.Resolver, mapper *dns.Resolve
 	}
 
 	server := &DNSServer{
-		Server:        serverIn,
-		resolver:      resolver,
 		stack:         s,
 		tcpListener:   tcpListener,
 		udpEndpoint:   endpoint,
 		udpEndpointID: id,
 		NICID:         nicID,
 	}
-	server.SetHandler(handler)
-	server.Server.Server = &D.Server{Listener: tcpListener, Handler: server}
-
-	go func() {
-		server.ActivateAndServe()
-	}()
 
 	return server, err
 }
@@ -220,7 +213,9 @@ func CreateDNSServer(s *stack.Stack, resolver *dns.Resolver, mapper *dns.Resolve
 // Stop stop the DNS Server on tun
 func (s *DNSServer) Stop() {
 	// shutdown TCP DNS Server
-	s.Server.Shutdown()
+	if s.Server != nil {
+		s.Server.Shutdown()
+	}
 	// remove TCP endpoint from stack
 	if s.Listener != nil {
 		s.Listener.Close()
@@ -238,6 +233,37 @@ func (s *DNSServer) Stop() {
 		s.NICID)
 }
 
+// Set the resolver to serve DNS request
+func (s *DNSServer) ResetResolver(resolver *dns.Resolver, mapper *dns.ResolverEnhancer) error {
+	if resolver == nil {
+		return fmt.Errorf("failed to create DNS server on tun: resolver not provided")
+	}
+	if resolver == s.resolver && mapper == s.mapper {
+		return nil
+	}
+	s.resolver = resolver
+	s.mapper = mapper
+
+	// Stop the old server
+	if s.Server != nil {
+		s.Server.Shutdown()
+	}
+	// Create a new server
+	handler := dns.NewHandler(resolver, mapper)
+	dnsServer := &dns.Server{}
+	dnsServer.SetHandler(handler)
+	s.Server = dnsServer
+	// Serve on TCP
+	dnsServer.Server = &D.Server{Listener: s.tcpListener, Handler: dnsServer}
+	// Serve on UDP
+	s.udpEndpoint.ServeDNS = dnsServer.ServeDNS
+	// Start the new server
+	go func() {
+		dnsServer.ActivateAndServe()
+	}()
+	return nil
+}
+
 // DNSListen return the listening address of DNS Server
 func (t *tunAdapter) DNSListen() string {
 	if t.dnsserver != nil {
@@ -248,12 +274,12 @@ func (t *tunAdapter) DNSListen() string {
 }
 
 // Stop stop the DNS Server on tun
-func (t *tunAdapter) ReCreateDNSServer(resolver *dns.Resolver, mapper *dns.ResolverEnhancer, addr string) error {
+func (t *tunAdapter) ReCreateDNSServer(addr string) error {
 	if addr == "" && t.dnsserver == nil {
 		return nil
 	}
 
-	if addr == t.DNSListen() && t.dnsserver != nil && t.dnsserver.resolver == resolver {
+	if addr == t.DNSListen() {
 		return nil
 	}
 
@@ -269,20 +295,23 @@ func (t *tunAdapter) ReCreateDNSServer(resolver *dns.Resolver, mapper *dns.Resol
 		return nil
 	}
 
-	if resolver == nil {
-		return fmt.Errorf("failed to create DNS server on tun: resolver not provided")
-	}
-
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return err
 	}
 
-	server, err := CreateDNSServer(t.ipstack, resolver, mapper, udpAddr.IP, udpAddr.Port, nicID)
+	server, err := CreateDNSServer(t.ipstack, udpAddr.IP, udpAddr.Port, nicID)
 	if err != nil {
 		return err
 	}
 	t.dnsserver = server
 	log.Infoln("Tun DNS server listening at: %s", addr)
+	return nil
+}
+
+func (t *tunAdapter) ResetDNSResolver(resolver *dns.Resolver, mapper *dns.ResolverEnhancer) error {
+	if t.dnsserver != nil {
+		return t.dnsserver.ResetResolver(resolver, mapper)
+	}
 	return nil
 }

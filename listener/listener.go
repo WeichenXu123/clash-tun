@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/Dreamacro/clash/adapter/inbound"
-	"github.com/Dreamacro/clash/component/resolver"
 	"github.com/Dreamacro/clash/config"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/dns"
@@ -342,7 +341,7 @@ func ReCreateTun(conf config.Tun, tcpIn chan<- C.ConnContext, udpIn chan<- *inbo
 	if tunAdapter != nil {
 		if enable && (url == "" || url == tunAdapter.DeviceURL()) {
 			// Though we don't need to recreate tun device, we should update tun DNSServer
-			err = tunAdapter.ReCreateDNSServer(resolver.DefaultResolver.(*dns.Resolver), resolver.DefaultHostMapper.(*dns.ResolverEnhancer), conf.DNSListen)
+			err = tunAdapter.ReCreateDNSServer(conf.DNSListen)
 		}
 		tunAdapter.Close()
 		tunAdapter = nil
@@ -354,8 +353,11 @@ func ReCreateTun(conf config.Tun, tcpIn chan<- C.ConnContext, udpIn chan<- *inbo
 	if err != nil {
 		return
 	}
-	if resolver.DefaultResolver != nil {
-		err = tunAdapter.ReCreateDNSServer(resolver.DefaultResolver.(*dns.Resolver), resolver.DefaultHostMapper.(*dns.ResolverEnhancer), conf.DNSListen)
+	tunAdapter.ReCreateDNSServer(conf.DNSListen)
+}
+func ResetDNSResolver(resolver *dns.Resolver, mapper *dns.ResolverEnhancer) {
+	if tunAdapter != nil {
+		tunAdapter.ResetDNSResolver(resolver, mapper)
 	}
 }
 

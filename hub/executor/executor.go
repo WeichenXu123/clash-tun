@@ -147,6 +147,7 @@ func updateDNS(c *config.DNS) {
 	resolver.DefaultHostMapper = m
 
 	dns.ReCreateServer(c.Listen, r, m)
+	listener.ResetDNSResolver(r, m)
 }
 
 func updateHosts(tree *trie.DomainTrie) {

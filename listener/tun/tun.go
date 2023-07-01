@@ -6,7 +6,10 @@ import "github.com/Dreamacro/clash/dns"
 type TunAdapter interface {
 	Close()
 	DeviceURL() string
-	// Create creates dns server on tun device
-	ReCreateDNSServer(resolver *dns.Resolver, mapper *dns.ResolverEnhancer, addr string) error
+	// Creates dns server on tun device
+	ReCreateDNSServer(addr string) error
+	// Set the resolver to serve DNS request
+	ResetDNSResolver(resolver *dns.Resolver, mapper *dns.ResolverEnhancer) error
+	// Get the current listening address of DNS Server
 	DNSListen() string
 }
